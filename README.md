@@ -8,7 +8,7 @@ Translate a text-based ebook PDF on your own computer while retaining each page,
 - Sends only extracted text blocks to the translation API; it does not upload PDF files itself.
 - Keeps PDF processing and the resulting file on this computer.
 - Uses an OpenAI API key **only on this computer** through a local `.env` file.
-- Limits a first test to 40 pages, so you can judge quality and cost before translating a whole book.
+- Allows up to 300 pages per run, so you can judge quality and cost before translating a whole book.
 
 ## First run on Windows
 
@@ -28,7 +28,7 @@ Translate a text-based ebook PDF on your own computer while retaining each page,
    ```env
    OPENAI_API_KEY=sk-your-key-goes-here
    OPENAI_MODEL=gpt-4.1-mini
-   MAX_PAGES=40
+   MAX_PAGES=300
    ```
 
    The key stays only in `.env`. Never commit it to GitHub or paste it into the webpage.
