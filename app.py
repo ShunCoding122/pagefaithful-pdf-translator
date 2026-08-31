@@ -46,29 +46,65 @@ def text_blocks(page: fitz.Page) -> list[TextBlock]:
     return blocks
 
 
-def json_from_model(raw: str) -> list[str]:
-    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.IGNORECASE)
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(502, "The translation service returned an invalid response. Please try again.") from exc
-    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-        raise HTTPException(502, "The translation service returned an invalid response. Please try again.")
-    return value
+def translate_one(client: OpenAI, text: str, language: str) -> str:
+    prompt = (
+        f"Translate the following private ebook text into {language}. Preserve paragraph breaks, "
+        "headings, numbers, names, citations, and punctuation. Return only the translation.\n\n"
+        + text
+    )
+    return client.responses.create(model=MODEL, input=prompt, store=False).output_text.strip()
 
 
 def translate_batch(client: OpenAI, texts: list[str], language: str) -> list[str]:
+    # Structured Outputs prevents malformed JSON. If the model still omits a block,
+    # retry only that block, so one bad fragment never fails the whole book.
+    schema = {
+        "type": "object",
+        "properties": {
+            "translations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"id": {"type": "integer"}, "text": {"type": "string"}},
+                    "required": ["id", "text"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["translations"],
+        "additionalProperties": False,
+    }
+    payload = [{"id": index, "text": text} for index, text in enumerate(texts)]
     prompt = (
-        f"Translate every string in this JSON array into {language}. This is text from a privately owned ebook. "
+        f"Translate each item's text into {language}. This is text from a privately owned ebook. "
         "Preserve paragraph breaks, headings, numbers, names, citations, and inline punctuation. "
-        "Do not summarize or add commentary. Return ONLY a valid JSON array of strings in exactly "
-        "the same order and with exactly the same number of items.\n\n"
-        + json.dumps(texts, ensure_ascii=False)
+        "Return every supplied id exactly once.\n\n"
+        + json.dumps(payload, ensure_ascii=False)
     )
-    translations = json_from_model(client.responses.create(model=MODEL, input=prompt).output_text)
-    if len(translations) != len(texts):
-        raise HTTPException(502, "The translation service returned the wrong number of text blocks. Please try again.")
-    return translations
+    response = client.responses.create(
+        model=MODEL,
+        input=prompt,
+        text={"format": {"type": "json_schema", "name": "block_translations", "strict": True, "schema": schema}},
+        store=False,
+    )
+    try:
+        items = json.loads(response.output_text)["translations"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        items = []
+
+    translated_by_id = {
+        item["id"]: item["text"].strip()
+        for item in items
+        if isinstance(item, dict)
+        and isinstance(item.get("id"), int)
+        and 0 <= item["id"] < len(texts)
+        and isinstance(item.get("text"), str)
+        and item["text"].strip()
+    }
+    return [
+        translated_by_id.get(index) or translate_one(client, text, language)
+        for index, text in enumerate(texts)
+    ]
 
 
 def translate_page(client: OpenAI, blocks: list[TextBlock], language: str) -> list[str]:
