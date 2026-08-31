@@ -1,7 +1,6 @@
-fastapi
-uvicorn[standard]
-python-multipart
-pymupdf
-openai
-pillow
-pytesseract
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+pymupdf>=1.24
+openai>=1.0
+python-dotenv>=1.0
