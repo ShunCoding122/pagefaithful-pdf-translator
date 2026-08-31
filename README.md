@@ -8,7 +8,7 @@ Translate a text-based ebook PDF on your own computer while retaining each page,
 - Sends only extracted text blocks to the translation API; it does not upload PDF files itself.
 - Keeps PDF processing and the resulting file on this computer.
 - Uses an OpenAI API key **only on this computer** through a local `.env` file.
-- Allows up to 300 pages per run and translates up to four text batches concurrently, so you can judge quality and cost before translating a whole book.
+- Allows up to 300 pages per run, groups visual lines into paragraphs, and shows live progress while translating., so you can judge quality and cost before translating a whole book.
 
 ## First run on Windows
 
@@ -30,6 +30,7 @@ Translate a text-based ebook PDF on your own computer while retaining each page,
    OPENAI_MODEL=gpt-4.1-mini
    MAX_PAGES=300
    TRANSLATION_WORKERS=4
+   BATCH_CHAR_LIMIT=12000
    ```
 
    The key stays only in `.env`. Never commit it to GitHub or paste it into the webpage.
@@ -46,4 +47,4 @@ Press `Ctrl+C` in PowerShell to stop it.
 
 ## Scope and next steps
 
-This first local version intentionally does not bypass DRM, work on password-protected files, or accept image-only/scanned PDFs. OCR and cloud deployment can be added after the page-layout result is validated. For cloud deployment, the same application will use a server-side secret rather than the `.env` file.
+This local version groups normal ebook text into paragraphs before translating it, leaves image blocks untouched, and does not bypass DRM, work on password-protected files, or accept image-only/scanned PDFs. OCR and cloud deployment can be added after the page-layout result is validated. For cloud deployment, the same application will use a server-side secret rather than the `.env` file.
