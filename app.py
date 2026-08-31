@@ -8,6 +8,7 @@ import io
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 import fitz
@@ -20,6 +21,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(APP_DIR, ".env"))
 MAX_PAGES = int(os.getenv("MAX_PAGES", "300"))
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+TRANSLATION_WORKERS = int(os.getenv("TRANSLATION_WORKERS", "4"))
 app = FastAPI(title="PageFaithful PDF Translator")
 
 
@@ -107,16 +109,36 @@ def translate_batch(client: OpenAI, texts: list[str], language: str) -> list[str
     ]
 
 
-def translate_page(client: OpenAI, blocks: list[TextBlock], language: str) -> list[str]:
-    translations, batch, chars = [], [], 0
-    for block in blocks:
-        if batch and chars + len(block.text) > 10_000:
-            translations.extend(translate_batch(client, batch, language))
-            batch, chars = [], 0
-        batch.append(block.text)
-        chars += len(block.text)
-    if batch:
-        translations.extend(translate_batch(client, batch, language))
+def translate_document(
+    client: OpenAI, page_blocks: list[list[TextBlock]], language: str
+) -> dict[tuple[int, int], str]:
+    """Batch adjacent text across pages and translate up to four batches at once."""
+    jobs: list[tuple[list[tuple[int, int]], list[str]]] = []
+    refs: list[tuple[int, int]] = []
+    texts: list[str] = []
+    chars = 0
+
+    for page_no, blocks in enumerate(page_blocks):
+        for block_no, block in enumerate(blocks):
+            if texts and chars + len(block.text) > 10_000:
+                jobs.append((refs, texts))
+                refs, texts, chars = [], [], 0
+            refs.append((page_no, block_no))
+            texts.append(block.text)
+            chars += len(block.text)
+    if texts:
+        jobs.append((refs, texts))
+
+    translations: dict[tuple[int, int], str] = {}
+    with ThreadPoolExecutor(max_workers=max(1, TRANSLATION_WORKERS)) as pool:
+        pending = {
+            pool.submit(translate_batch, client, batch_texts, language): batch_refs
+            for batch_refs, batch_texts in jobs
+        }
+        for future in as_completed(pending):
+            batch_refs = pending[future]
+            batch_translations = future.result()
+            translations.update(dict(zip(batch_refs, batch_translations)))
     return translations
 
 
@@ -162,13 +184,12 @@ async def convert(file: UploadFile = File(...), language: str = Form("Chinese (S
 
     client, output = openai_client(), fitz.open()
     try:
+        translated_blocks = translate_document(client, page_blocks, language)
         for page_no, original in enumerate(source):
             new = output.new_page(width=original.rect.width, height=original.rect.height)
             new.show_pdf_page(original.rect, source, page_no)
-            blocks = page_blocks[page_no]
-            translations = translate_page(client, blocks, language) if blocks else []
-            for block, translation in zip(blocks, translations):
-                write_translation(new, block.rect, translation)
+            for block_no, block in enumerate(page_blocks[page_no]):
+                write_translation(new, block.rect, translated_blocks[(page_no, block_no)])
         data = output.tobytes(garbage=4, deflate=True)
     finally:
         output.close()
