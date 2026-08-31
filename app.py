@@ -62,7 +62,7 @@ def openai_client() -> OpenAI:
 
 
 def paragraph_blocks(page: fitz.Page) -> list[TextBlock]:
-    """Turn visual line blocks from ebook PDFs into coherent paragraph blocks."""
+    """Turn a simple ebook page into one readable, paragraph-aware text region."""
     lines: list[TextBlock] = []
     for item in page.get_text("dict")["blocks"]:
         if item["type"] != 0:
@@ -79,27 +79,23 @@ def paragraph_blocks(page: fitz.Page) -> list[TextBlock]:
     lines.sort(key=lambda block: (round(block.rect.y0, 1), block.rect.x0))
     typical_height = median(max(1.0, line.rect.height) for line in lines)
     max_same_paragraph_gap = max(3.0, typical_height * 1.55)
+    left_edge = min(line.rect.x0 for line in lines)
 
-    paragraphs: list[TextBlock] = []
-    current = [lines[0]]
-    for line in lines[1:]:
-        previous = current[-1]
+    pieces = [lines[0].text]
+    for index, line in enumerate(lines[1:], start=1):
+        previous = lines[index - 1]
         vertical_gap = line.rect.y0 - previous.rect.y1
-        # A normal first-line indent is allowed. A clear vertical gap starts a paragraph.
-        if vertical_gap <= max_same_paragraph_gap:
-            current.append(line)
-            continue
-        rect = fitz.Rect(current[0].rect)
-        for part in current[1:]:
-            rect |= part.rect
-        paragraphs.append(TextBlock(rect, " ".join(part.text for part in current)))
-        current = [line]
+        starts_paragraph = (
+            vertical_gap > max_same_paragraph_gap
+            or line.rect.x0 - left_edge > 8
+        )
+        pieces.append("\n\n" if starts_paragraph else " ")
+        pieces.append(line.text)
 
-    rect = fitz.Rect(current[0].rect)
-    for part in current[1:]:
-        rect |= part.rect
-    paragraphs.append(TextBlock(rect, " ".join(part.text for part in current)))
-    return paragraphs
+    rect = fitz.Rect(lines[0].rect)
+    for line in lines[1:]:
+        rect |= line.rect
+    return [TextBlock(rect, "".join(pieces))]
 
 
 def translate_one(client: OpenAI, text: str, language: str) -> str:
