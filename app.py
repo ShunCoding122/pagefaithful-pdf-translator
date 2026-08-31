@@ -21,6 +21,21 @@ MAX_PAGES = int(os.getenv("MAX_PAGES", "300"))
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 TRANSLATION_WORKERS = int(os.getenv("TRANSLATION_WORKERS", "4"))
 BATCH_CHAR_LIMIT = int(os.getenv("BATCH_CHAR_LIMIT", "12000"))
+FONT_NAME = "pagefaithful_cjk"
+
+
+def resolve_cjk_font() -> str | None:
+    candidates = [
+        os.getenv("PDF_TRANSLATOR_FONT", ""),
+        r"C:\\Windows\\Fonts\\msyh.ttc",   # Microsoft YaHei, standard on Chinese Windows
+        r"C:\\Windows\\Fonts\\simhei.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+    ]
+    return next((path for path in candidates if path and os.path.isfile(path)), None)
+
+
+CJK_FONT_PATH = resolve_cjk_font()
 
 app = FastAPI(title="PageFaithful PDF Translator")
 _progress_lock = Lock()
@@ -224,16 +239,23 @@ def translate_document(
 
 
 def write_translation(page: fitz.Page, rect: fitz.Rect, translation: str) -> None:
+    if not CJK_FONT_PATH:
+        raise HTTPException(
+            500,
+            "No embeddable Chinese font was found. Set PDF_TRANSLATOR_FONT in .env to a Chinese .ttf or .ttc font file.",
+        )
+    # Embed the actual local font into every translated page. This keeps Chinese,
+    # Latin text, numbers, and punctuation consistent on Windows, iPad, and other readers.
+    page.insert_font(fontname=FONT_NAME, fontfile=CJK_FONT_PATH)
     rect = fitz.Rect(rect.x0 - 0.8, rect.y0 - 0.6, rect.x1 + 0.8, rect.y1 + 0.6)
     page.draw_rect(rect, color=None, fill=(1, 1, 1), overlay=True)
-    # Paragraph rectangles can use a readable font first; shrink only when necessary.
     for size in (13.0 - step * 0.5 for step in range(16)):
         if page.insert_textbox(
-            rect, translation, fontsize=size, fontname="china-s",
+            rect, translation, fontsize=size, fontname=FONT_NAME,
             color=(0, 0, 0), lineheight=1.13, overlay=True,
         ) >= 0:
             return
-    page.insert_textbox(rect, translation, fontsize=5.5, fontname="china-s", color=(0, 0, 0), overlay=True)
+    page.insert_textbox(rect, translation, fontsize=5.5, fontname=FONT_NAME, color=(0, 0, 0), overlay=True)
 
 
 def process_document(content: bytes, filename: str, language: str) -> tuple[bytes, str]:
