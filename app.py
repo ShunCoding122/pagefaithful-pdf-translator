@@ -13,7 +13,7 @@ import pymupdf as fitz
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
-from openai import OpenAI
+from openai import APITimeoutError, OpenAI
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(APP_DIR, ".env"))
@@ -58,7 +58,7 @@ def openai_client() -> OpenAI:
             "OPENAI_API_KEY is not configured. Create .env from .env.example, then restart the app.",
         )
     # One retry handles a transient network fault without silently waiting through many retries.
-    return OpenAI(max_retries=1, timeout=120.0)
+    return OpenAI(max_retries=0, timeout=300.0)
 
 
 def paragraph_blocks(page: fitz.Page) -> list[TextBlock]:
@@ -98,13 +98,25 @@ def paragraph_blocks(page: fitz.Page) -> list[TextBlock]:
     return [TextBlock(rect, "".join(pieces))]
 
 
+def streamed_output(client: OpenAI, **request) -> str:
+    """Collect a long Responses API result as it arrives, avoiding one long idle read."""
+    stream = client.responses.create(stream=True, store=False, **request)
+    pieces: list[str] = []
+    for event in stream:
+        if event.type == "response.output_text.delta":
+            pieces.append(event.delta)
+        elif event.type == "error":
+            raise RuntimeError(getattr(event, "message", "The translation service returned an error."))
+    return "".join(pieces).strip()
+
+
 def translate_one(client: OpenAI, text: str, language: str) -> str:
     prompt = (
         f"Translate the following private ebook paragraph into {language}. Preserve names, "
         "numbers, quotations, citations, and paragraph meaning. Return only the translation.\n\n"
         + text
     )
-    return client.responses.create(model=MODEL, input=prompt, store=False).output_text.strip()
+    return streamed_output(client, model=MODEL, input=prompt)
 
 
 def translate_batch(client: OpenAI, texts: list[str], language: str) -> list[str]:
@@ -130,14 +142,25 @@ def translate_batch(client: OpenAI, texts: list[str], language: str) -> list[str
         "Keep every supplied id exactly once. Do not summarize or add commentary.\n\n"
         + json.dumps(payload, ensure_ascii=False)
     )
-    response = client.responses.create(
-        model=MODEL,
-        input=prompt,
-        text={"format": {"type": "json_schema", "name": "paragraph_translations", "strict": True, "schema": schema}},
-        store=False,
-    )
     try:
-        items = json.loads(response.output_text)["translations"]
+        raw = streamed_output(
+            client,
+            model=MODEL,
+            input=prompt,
+            text={"format": {"type": "json_schema", "name": "paragraph_translations", "strict": True, "schema": schema}},
+        )
+    except APITimeoutError:
+        # A congested or unusually long batch is split instead of terminating the book.
+        if len(texts) > 1:
+            midpoint = len(texts) // 2
+            return (
+                translate_batch(client, texts[:midpoint], language)
+                + translate_batch(client, texts[midpoint:], language)
+            )
+        return [translate_one(client, texts[0], language)]
+
+    try:
+        items = json.loads(raw)["translations"]
     except (json.JSONDecodeError, KeyError, TypeError):
         items = []
 
@@ -150,7 +173,6 @@ def translate_batch(client: OpenAI, texts: list[str], language: str) -> list[str
         and isinstance(item.get("text"), str)
         and item["text"].strip()
     }
-    # A missing item is retried on its own. One flawed response cannot waste the whole book.
     return [
         translated_by_id.get(index) or translate_one(client, text, language)
         for index, text in enumerate(texts)
