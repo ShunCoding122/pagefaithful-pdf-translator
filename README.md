@@ -48,3 +48,8 @@ Press `Ctrl+C` in PowerShell to stop it.
 ## Scope and next steps
 
 This local version groups normal ebook text into paragraphs before translating it, leaves image blocks untouched, and does not bypass DRM, work on password-protected files, or accept image-only/scanned PDFs. OCR and cloud deployment can be added after the page-layout result is validated. For cloud deployment, the same application will use a server-side secret rather than the `.env` file.
+
+
+## Chinese font embedding
+
+On Windows, PageFaithful automatically embeds Microsoft YaHei from `C:\\Windows\\Fonts\\msyh.ttc`. This prevents Chinese, numbers, English names, and punctuation from spacing incorrectly in other PDF readers. If your computer does not have that font, set `PDF_TRANSLATOR_FONT` in `.env` to a Chinese `.ttf` or `.ttc` font path.
