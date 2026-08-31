@@ -47,7 +47,7 @@ def text_blocks(page: fitz.Page) -> list[TextBlock]:
 
 
 def json_from_model(raw: str) -> list[str]:
-    raw = re.sub(r"^\`\`\`(?:json)?\\s*|\\s*\`\`\`$", "", raw.strip(), flags=re.IGNORECASE)
+    raw = re.sub(r"^```(?:json)?\\s*|\\s*```$", "", raw.strip(), flags=re.IGNORECASE)
     try:
         value = json.loads(raw)
     except json.JSONDecodeError as exc:
