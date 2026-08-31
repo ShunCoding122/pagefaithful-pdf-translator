@@ -18,7 +18,7 @@ from openai import OpenAI
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(APP_DIR, ".env"))
-MAX_PAGES = int(os.getenv("MAX_PAGES", "40"))
+MAX_PAGES = int(os.getenv("MAX_PAGES", "300"))
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 app = FastAPI(title="PageFaithful PDF Translator")
 
