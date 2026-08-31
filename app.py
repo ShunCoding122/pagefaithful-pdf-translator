@@ -34,7 +34,7 @@ class TextBlock:
 
 
 def set_progress(stage: str, message: str, *, completed: int | None = None,
-                 total: int | None = None, pages: int | None = None) -> None:
+                 total: int | None = None, received: int | None = None, pages: int | None = None) -> None:
     with _progress_lock:
         _progress["stage"] = stage
         _progress["message"] = message
@@ -42,6 +42,8 @@ def set_progress(stage: str, message: str, *, completed: int | None = None,
             _progress["completed"] = completed
         if total is not None:
             _progress["total"] = total
+        if received is not None:
+            _progress["received"] = received
         if pages is not None:
             _progress["pages"] = pages
 
@@ -49,6 +51,11 @@ def set_progress(stage: str, message: str, *, completed: int | None = None,
 def advance_progress(amount: int) -> None:
     with _progress_lock:
         _progress["completed"] += amount
+
+
+def add_received_characters(amount: int) -> None:
+    with _progress_lock:
+        _progress["received"] += amount
 
 
 def openai_client() -> OpenAI:
@@ -105,6 +112,7 @@ def streamed_output(client: OpenAI, **request) -> str:
     for event in stream:
         if event.type == "response.output_text.delta":
             pieces.append(event.delta)
+            add_received_characters(len(event.delta))
         elif event.type == "error":
             raise RuntimeError(getattr(event, "message", "The translation service returned an error."))
     return "".join(pieces).strip()
@@ -199,7 +207,7 @@ def translate_document(
         jobs.append((refs, texts))
 
     total = sum(len(blocks) for blocks in page_blocks)
-    set_progress("translating", "正在翻译文字段", completed=0, total=total)
+    set_progress("translating", "正在翻译文字段", completed=0, total=total, received=0)
 
     translations: dict[tuple[int, int], str] = {}
     with ThreadPoolExecutor(max_workers=max(1, TRANSLATION_WORKERS)) as pool:
