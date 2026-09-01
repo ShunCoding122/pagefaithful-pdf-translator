@@ -1,6 +1,6 @@
 # PageFaithful — local-first PDF translator
 
-Translate a text-based ebook PDF on your own computer while retaining each page, image, and approximate text-block position. The browser UI is local: `http://127.0.0.1:8000`.
+Translate a text-based ebook PDF on your own computer into a clean, continuous reading PDF. The browser UI is local: `http://127.0.0.1:8000`.
 
 ## What it does now
 
@@ -13,7 +13,7 @@ Translate a text-based ebook PDF on your own computer while retaining each page,
 ## First run on Windows
 
 1. Install [Python 3.11+](https://www.python.org/downloads/) and tick **Add Python to PATH** during setup.
-2. Open PowerShell in this folder and run:
+2. Open Command Prompt in this folder and run:
 
    ```powershell
    py -m venv .venv
