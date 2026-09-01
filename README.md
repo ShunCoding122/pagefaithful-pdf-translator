@@ -8,7 +8,10 @@ Translate a text-based ebook PDF on your own computer into a clean, continuous r
 - Sends only extracted text blocks to the translation API; it does not upload PDF files itself.
 - Keeps PDF processing and the resulting file on this computer.
 - Uses an OpenAI API key **only on this computer** through a local `.env` file.
-- Allows up to 300 pages per run, groups visual lines into paragraphs, and shows live progress while translating., so you can judge quality and cost before translating a whole book.
+- Uses one consistent embedded Chinese font and fixed body size across the whole book.
+- Reflows paragraphs naturally across pages, so a source-PDF page break never forces a sentence, punctuation mark, or word into an awkward position.
+- Keeps image-only pages (covers, diagrams, and photos) unchanged; it does not attempt to translate text inside images.
+- Allows up to 300 pages per run and shows live progress while translating.
 
 ## First run on Windows
 
@@ -29,6 +32,7 @@ Translate a text-based ebook PDF on your own computer into a clean, continuous r
    OPENAI_API_KEY=sk-your-key-goes-here
    OPENAI_MODEL=gpt-4.1-mini
    MAX_PAGES=300
+   BODY_FONT_SIZE=10.5
    TRANSLATION_WORKERS=4
    BATCH_CHAR_LIMIT=12000
    ```
@@ -47,7 +51,7 @@ Press `Ctrl+C` in PowerShell to stop it.
 
 ## Scope and next steps
 
-This local version groups normal ebook text into paragraphs before translating it, leaves image blocks untouched, and does not bypass DRM, work on password-protected files, or accept image-only/scanned PDFs. OCR and cloud deployment can be added after the page-layout result is validated. For cloud deployment, the same application will use a server-side secret rather than the `.env` file.
+This local version does not bypass DRM or work on password-protected files. It does not OCR or translate text inside images. OCR and cloud deployment can be added later. For cloud deployment, the same application will use a server-side secret rather than the `.env` file.
 
 
 ## Chinese font embedding
