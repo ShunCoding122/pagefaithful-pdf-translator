@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from statistics import median
@@ -22,6 +23,11 @@ MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 TRANSLATION_WORKERS = int(os.getenv("TRANSLATION_WORKERS", "4"))
 BATCH_CHAR_LIMIT = int(os.getenv("BATCH_CHAR_LIMIT", "12000"))
 FONT_NAME = "pagefaithful_cjk"
+BODY_FONT_SIZE = float(os.getenv("BODY_FONT_SIZE", "10.5"))
+BODY_LINE_HEIGHT = float(os.getenv("BODY_LINE_HEIGHT", "1.42"))
+PAGE_MARGIN_X = float(os.getenv("PAGE_MARGIN_X", "54"))
+PAGE_MARGIN_Y = float(os.getenv("PAGE_MARGIN_Y", "58"))
+PARAGRAPH_GAP = float(os.getenv("PARAGRAPH_GAP", "8"))
 
 
 def resolve_cjk_font() -> str | None:
@@ -136,7 +142,7 @@ def streamed_output(client: OpenAI, **request) -> str:
 def translate_one(client: OpenAI, text: str, language: str) -> str:
     prompt = (
         f"Translate the following private ebook paragraph into {language}. Preserve names, "
-        "numbers, quotations, citations, and paragraph meaning. Return only the translation.\n\n"
+        "numbers, quotations, citations, and paragraph meaning. Preserve paragraph breaks. Return only the translation.\n\n"
         + text
     )
     return streamed_output(client, model=MODEL, input=prompt)
@@ -162,7 +168,7 @@ def translate_batch(client: OpenAI, texts: list[str], language: str) -> list[str
     payload = [{"id": index, "text": text} for index, text in enumerate(texts)]
     prompt = (
         f"Translate every paragraph in this JSON array into {language}. This is a private ebook. "
-        "Keep every supplied id exactly once. Do not summarize or add commentary.\n\n"
+        "Keep every supplied id exactly once, preserving paragraph breaks within each text. Do not summarize or add commentary.\n\n"
         + json.dumps(payload, ensure_ascii=False)
     )
     try:
@@ -238,24 +244,130 @@ def translate_document(
     return translations
 
 
-def write_translation(page: fitz.Page, rect: fitz.Rect, translation: str) -> None:
+def normalize_translation(text: str) -> str:
+    """Remove layout artefacts while keeping spaces inside Latin words intact."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    text = re.sub(r"(?<=[\u3400-\u9fff])\s+(?=[\u3400-\u9fff])", "", text)
+    text = re.sub(r"\s+([，。！？；：、】【）》〉」』])", r"\1", text)
+    text = re.sub(r"([（【《〈「『])\s+", r"\1", text)
+    text = re.sub(r"(?<=[\u3400-\u9fff])\s+(?=[A-Za-z0-9])", "", text)
+    text = re.sub(r"(?<=[A-Za-z0-9])\s+(?=[\u3400-\u9fff])", "", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def reader_rect(page: fitz.Page, top: float | None = None) -> fitz.Rect:
+    return fitz.Rect(PAGE_MARGIN_X, PAGE_MARGIN_Y if top is None else top,
+                     page.rect.width - PAGE_MARGIN_X, page.rect.height - PAGE_MARGIN_Y)
+
+
+def add_reader_page(output: fitz.Document, template: fitz.Page) -> fitz.Page:
     if not CJK_FONT_PATH:
-        raise HTTPException(
-            500,
-            "No embeddable Chinese font was found. Set PDF_TRANSLATOR_FONT in .env to a Chinese .ttf or .ttc font file.",
-        )
-    # Embed the actual local font into every translated page. This keeps Chinese,
-    # Latin text, numbers, and punctuation consistent on Windows, iPad, and other readers.
+        raise HTTPException(500, "No embeddable Chinese font was found. Set PDF_TRANSLATOR_FONT in .env to a Chinese .ttf or .ttc font file.")
+    page = output.new_page(width=template.rect.width, height=template.rect.height)
     page.insert_font(fontname=FONT_NAME, fontfile=CJK_FONT_PATH)
-    rect = fitz.Rect(rect.x0 - 0.8, rect.y0 - 0.6, rect.x1 + 0.8, rect.y1 + 0.6)
-    page.draw_rect(rect, color=None, fill=(1, 1, 1), overlay=True)
-    for size in (13.0 - step * 0.5 for step in range(16)):
-        if page.insert_textbox(
-            rect, translation, fontsize=size, fontname=FONT_NAME,
-            color=(0, 0, 0), lineheight=1.13, overlay=True,
-        ) >= 0:
-            return
-    page.insert_textbox(rect, translation, fontsize=5.5, fontname=FONT_NAME, color=(0, 0, 0), overlay=True)
+    return page
+
+
+def can_fit(measure_page: fitz.Page, rect: fitz.Rect, text: str) -> bool:
+    return measure_page.insert_textbox(rect, text, fontsize=BODY_FONT_SIZE,
+                                       fontname=FONT_NAME, lineheight=BODY_LINE_HEIGHT) >= 0
+
+
+def sentence_fragments(text: str) -> list[str]:
+    fragments = [part for part in re.split(r"(?<=[。！？；…])", text) if part]
+    return fragments or [text]
+
+
+def largest_fitting_prefix(measure_page: fitz.Page, rect: fitz.Rect, text: str) -> tuple[str, str]:
+    """Prefer a sentence boundary when an unusually long paragraph must span pages."""
+    prefix = ""
+    for fragment in sentence_fragments(text):
+        candidate = prefix + fragment
+        if can_fit(measure_page, rect, candidate):
+            prefix = candidate
+        else:
+            break
+    if prefix:
+        return prefix, text[len(prefix):]
+
+    low, high, best = 1, len(text), 0
+    while low <= high:
+        midpoint = (low + high) // 2
+        if can_fit(measure_page, rect, text[:midpoint]):
+            best, low = midpoint, midpoint + 1
+        else:
+            high = midpoint - 1
+    if best == 0:
+        raise HTTPException(500, "The selected reader font is too large for this page size.")
+    break_at = max(text.rfind("，", 0, best), text.rfind("、", 0, best), text.rfind(" ", 0, best))
+    if break_at > max(1, best // 2):
+        best = break_at + 1
+    return text[:best], text[best:]
+
+
+def render_reader_document(source: fitz.Document, page_blocks: list[list[TextBlock]],
+                           translated_blocks: dict[tuple[int, int], str]) -> bytes:
+    """Create a clean, reflowable reading PDF instead of forcing text into source pages."""
+    if not CJK_FONT_PATH:
+        raise HTTPException(500, "No embeddable Chinese font was found. Set PDF_TRANSLATOR_FONT in .env to a Chinese .ttf or .ttc font file.")
+    output, measure_doc = fitz.open(), fitz.open()
+    measure_page = measure_doc.new_page(width=source[0].rect.width, height=source[0].rect.height)
+    measure_page.insert_font(fontname=FONT_NAME, fontfile=CJK_FONT_PATH)
+    current: fitz.Page | None = None
+    cursor = PAGE_MARGIN_Y
+
+    def start_page(template: fitz.Page) -> fitz.Page:
+        nonlocal current, cursor
+        current, cursor = add_reader_page(output, template), PAGE_MARGIN_Y
+        return current
+
+    def place(text: str, template: fitz.Page) -> None:
+        nonlocal current, cursor
+        if current is None:
+            start_page(template)
+        remaining, first_piece = text, True
+        while remaining:
+            assert current is not None
+            if cursor >= current.rect.height - PAGE_MARGIN_Y - 0.5:
+                start_page(template)
+            available = reader_rect(current, cursor)
+            candidate = ("　　" if first_piece else "") + remaining
+            if can_fit(measure_page, available, candidate):
+                leftover = current.insert_textbox(available, candidate, fontsize=BODY_FONT_SIZE,
+                    fontname=FONT_NAME, color=(0, 0, 0), lineheight=BODY_LINE_HEIGHT)
+                cursor = available.y1 - leftover + PARAGRAPH_GAP
+                return
+            if can_fit(measure_page, reader_rect(current), candidate):
+                start_page(template)
+                continue
+            prefix, remaining = largest_fitting_prefix(measure_page, available, candidate)
+            leftover = current.insert_textbox(available, prefix, fontsize=BODY_FONT_SIZE,
+                fontname=FONT_NAME, color=(0, 0, 0), lineheight=BODY_LINE_HEIGHT)
+            cursor = available.y1 - leftover + PARAGRAPH_GAP
+            first_piece = False
+            if remaining:
+                start_page(template)
+
+    try:
+        for page_no, original in enumerate(source):
+            blocks = page_blocks[page_no]
+            if not blocks:
+                if original.get_images(full=True):
+                    image_page = output.new_page(width=original.rect.width, height=original.rect.height)
+                    image_page.show_pdf_page(original.rect, source, page_no)
+                    current = None
+                continue
+            for block_no, _block in enumerate(blocks):
+                translated = normalize_translation(translated_blocks[(page_no, block_no)])
+                for paragraph in (part.strip() for part in re.split(r"\n\s*\n+", translated)):
+                    if paragraph:
+                        place(paragraph, original)
+        return output.tobytes(garbage=4, deflate=True)
+    finally:
+        measure_doc.close()
+        output.close()
 
 
 def process_document(content: bytes, filename: str, language: str) -> tuple[bytes, str]:
@@ -278,18 +390,9 @@ def process_document(content: bytes, filename: str, language: str) -> tuple[byte
         client = openai_client()
         translated_blocks = translate_document(client, page_blocks, language)
 
-        set_progress("building", "正在重建译后 PDF", completed=0, total=len(source), pages=len(source))
-        output = fitz.open()
-        try:
-            for page_no, original in enumerate(source):
-                new = output.new_page(width=original.rect.width, height=original.rect.height)
-                new.show_pdf_page(original.rect, source, page_no)
-                for block_no, block in enumerate(page_blocks[page_no]):
-                    write_translation(new, block.rect, translated_blocks[(page_no, block_no)])
-                set_progress("building", "正在重建译后 PDF", completed=page_no + 1, total=len(source), pages=len(source))
-            data = output.tobytes(garbage=4, deflate=True)
-        finally:
-            output.close()
+        set_progress("building", "正在排版为连续阅读版 PDF", completed=0, total=len(source), pages=len(source))
+        data = render_reader_document(source, page_blocks, translated_blocks)
+        set_progress("building", "正在排版为连续阅读版 PDF", completed=len(source), total=len(source), pages=len(source))
     finally:
         source.close()
 
